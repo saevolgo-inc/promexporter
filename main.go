@@ -29,6 +29,28 @@ type MetricMetadata struct {
 	Help      string
 }
 
+// SetupGauge - sets the value of gauge to the one provided
+func SetupGauge(namespace, id, help string, val float64) (bool, error) {
+	gauge, ok := Gauges[id]
+	if ok {
+		gauge.ValChannel <- val
+		return true, nil
+	} else {
+		CreateGauge(id, MetricMetadata{
+			Name:      id,
+			Namespace: namespace,
+			Help:      help,
+		})
+	}
+	gauge, ok = Gauges[id]
+	if ok {
+		gauge.ValChannel <- val
+		return true, nil
+	} else {
+		return false, errors.New("[SetupGauge] existing gauge not found | failed to create new gauge")
+	}
+}
+
 // Increments Value of Counter by 1 on given counter id
 func IncrementCounter(namespace, id, help string) (bool, error) {
 	counter, ok := Counters[id]
