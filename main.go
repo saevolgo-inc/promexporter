@@ -116,7 +116,7 @@ func CreateGauge(id string, data MetricMetadata) {
 		}),
 		ValChannel: make(chan float64),
 	}
-	prometheus.MustRegister(Counters[id].Counter)
+	prometheus.MustRegister(Gauges[id].Gauge)
 	go func(cd gaugeData) {
 		for {
 			val := <-cd.ValChannel
