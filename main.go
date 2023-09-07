@@ -1,4 +1,4 @@
-package promexporter
+package prometheus
 
 import (
 	"errors"
@@ -9,8 +9,9 @@ import (
 )
 
 var (
-	Counters = make(map[string]counterData)
-	Gauges   = make(map[string]gaugeData)
+	Counters  = make(map[string]counterData)
+	Gauges    = make(map[string]gaugeData)
+	GaugeVecs = make(map[string]guagevecData)
 )
 
 type counterData struct {
@@ -22,11 +23,74 @@ type gaugeData struct {
 	Gauge      prometheus.Gauge
 	ValChannel chan float64
 }
-
+type guagevecData struct {
+	Guagevec   *prometheus.GaugeVec
+	ValChannel chan GuageVecMetric
+}
+type Labels struct {
+	Name  string
+	Value string
+}
+type GuageVecMetric struct {
+	MetricValue float64
+	MetricName  string
+	LabelInfo   []Labels
+}
 type MetricMetadata struct {
-	Namespace string
-	Name      string
-	Help      string
+	Namespace  string
+	Name       string
+	LabelTitle string
+	LabelVal   string
+	Help       string
+	LabelInfo  []Labels
+}
+
+// SetupGaugeVecWithMultiLabels - sets the value of gauge to the one provided
+func SetupGaugeVecWithMultiLabels(namespace, id, help string, lbls []Labels, val float64) (bool, error) {
+
+	gauge, ok := GaugeVecs[id]
+	if ok {
+		gauge.Guagevec.Reset()
+		gauge.ValChannel <- GuageVecMetric{MetricValue: val, LabelInfo: lbls}
+		return true, nil
+	} else {
+		CreateGaugeVecWithMultiLabels(id, MetricMetadata{
+			Name:      id,
+			Help:      help,
+			LabelInfo: lbls,
+		})
+	}
+	gauge, ok = GaugeVecs[id]
+	if ok {
+		gauge.ValChannel <- GuageVecMetric{MetricValue: val, LabelInfo: lbls}
+		return true, nil
+	} else {
+		return false, errors.New("[SetupGauge] existing gauge not found | failed to create new gauge")
+	}
+}
+
+// SetupGaugeVec - sets the value of gauge to the one provided
+func SetupGaugeVec(namespace, id, help, labelTitle, labelVal string, val float64) (bool, error) {
+
+	gauge, ok := GaugeVecs[id]
+	if ok {
+		gauge.ValChannel <- GuageVecMetric{MetricValue: val, MetricName: labelVal}
+		return true, nil
+	} else {
+		CreateGaugeVec(id, MetricMetadata{
+			Name:       id,
+			Help:       help,
+			LabelTitle: labelTitle,
+			LabelVal:   labelVal,
+		})
+	}
+	gauge, ok = GaugeVecs[id]
+	if ok {
+		gauge.ValChannel <- GuageVecMetric{MetricValue: val, MetricName: labelVal}
+		return true, nil
+	} else {
+		return false, errors.New("[SetupGauge] existing gauge not found | failed to create new gauge")
+	}
 }
 
 // SetupGauge - sets the value of gauge to the one provided
@@ -106,6 +170,56 @@ func CreateCounters(data map[string]MetricMetadata) {
 	}
 }
 
+// CreateGaugeVecWithMultiLabels - Creates Gaguge based on the supplied metrics metadata
+func CreateGaugeVecWithMultiLabels(id string, data MetricMetadata) {
+	var definedLabels []string
+	for _, labels := range data.LabelInfo {
+		definedLabels = append(definedLabels, labels.Name)
+	}
+	GaugeVecs[id] = guagevecData{
+		Guagevec: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: data.Namespace,
+			Name:      data.Name,
+			Help:      data.Help,
+		},
+			definedLabels),
+		ValChannel: make(chan GuageVecMetric),
+	}
+
+	prometheus.MustRegister(GaugeVecs[id].Guagevec)
+	go func(cd guagevecData) {
+		for {
+			val := <-cd.ValChannel
+			var labelsGiven = make(map[string]string)
+			for _, x := range val.LabelInfo {
+				labelsGiven[x.Name] = x.Value
+			}
+			cd.Guagevec.With(labelsGiven).Set(float64(val.MetricValue))
+		}
+	}(GaugeVecs[id])
+}
+
+// Creates Gaguge based on the supplied metrics metadata
+func CreateGaugeVec(id string, data MetricMetadata) {
+	GaugeVecs[id] = guagevecData{
+		Guagevec: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: data.Namespace,
+			Name:      data.Name,
+			Help:      data.Help,
+		},
+			[]string{data.LabelTitle}),
+		ValChannel: make(chan GuageVecMetric),
+	}
+
+	prometheus.MustRegister(GaugeVecs[id].Guagevec)
+	go func(cd guagevecData) {
+		for {
+			val := <-cd.ValChannel
+			cd.Guagevec.WithLabelValues(val.MetricName).Set(float64(val.MetricValue))
+		}
+	}(GaugeVecs[id])
+}
+
 // Creates Gaguge based on the supplied metrics metadata
 func CreateGauge(id string, data MetricMetadata) {
 	Gauges[id] = gaugeData{
@@ -148,6 +262,7 @@ func RegisterRoute(r *mux.Router) {
 func Register() {
 	registerCounters()
 	registerGauges()
+	registerGaugeVecs()
 }
 
 func StartOps() {
@@ -178,5 +293,10 @@ func registerCounters() {
 func registerGauges() {
 	for _, v := range Gauges {
 		prometheus.MustRegister(v.Gauge)
+	}
+}
+func registerGaugeVecs() {
+	for _, v := range GaugeVecs {
+		prometheus.MustRegister(v.Guagevec)
 	}
 }
