@@ -9,9 +9,10 @@ import (
 )
 
 var (
-	Counters  = make(map[string]counterData)
-	Gauges    = make(map[string]gaugeData)
-	GaugeVecs = make(map[string]guagevecData)
+	CountersVecs = make(map[string]countervecData)
+	Counters     = make(map[string]counterData)
+	Gauges       = make(map[string]gaugeData)
+	GaugeVecs    = make(map[string]guagevecData)
 )
 
 type counterData struct {
@@ -27,9 +28,18 @@ type guagevecData struct {
 	Guagevec   *prometheus.GaugeVec
 	ValChannel chan GuageVecMetric
 }
+type countervecData struct {
+	Countervec *prometheus.CounterVec
+	ValChannel chan CounterVecMetric
+}
 type Labels struct {
 	Name  string
 	Value string
+}
+type CounterVecMetric struct {
+	MetricName string
+	LabelInfo  []Labels
+	//MetricValue int
 }
 type GuageVecMetric struct {
 	MetricValue float64
@@ -67,6 +77,131 @@ func SetupGaugeVecWithMultiLabels(namespace, id, help string, lbls []Labels, val
 	} else {
 		return false, errors.New("[SetupGauge] existing gauge not found | failed to create new gauge")
 	}
+}
+
+// IncrementCounterVecMultiLabelValues - Increment value of each label with new value and increment the main metric
+func (m *MetricMetadata) IncrementCounterVecMultiLabelValuesOnly(labelValues ...string) (bool, error) {
+	counter, ok := CountersVecs[m.Name]
+	if len(labelValues) != len(m.LabelInfo) {
+		return false, errors.New("count of label values not same as defined labels")
+	}
+	for i, _ := range m.LabelInfo {
+		m.LabelInfo[i].Value = labelValues[i]
+	}
+	if ok {
+		counter.ValChannel <- CounterVecMetric{MetricName: m.Name, LabelInfo: m.LabelInfo}
+		return true, nil
+	} else {
+		CreateCounterVecWithMultiLabels(m.Name, MetricMetadata{
+			Namespace: m.Namespace,
+			Name:      m.Name,
+			Help:      m.Help,
+			LabelInfo: m.LabelInfo,
+		})
+	}
+	return true, nil
+}
+
+// IncrementCounterVecMultiLabel - Increment value of each label with new value and increment the main metric
+func (m *MetricMetadata) IncrementCounterVecMultiLabel(labelsVals []Labels) (bool, error) {
+	counter, ok := CountersVecs[m.Name]
+	if ok {
+		counter.ValChannel <- CounterVecMetric{MetricName: m.Name, LabelInfo: labelsVals}
+		return true, nil
+	} else {
+		CreateCounterVecWithMultiLabels(m.Name, MetricMetadata{
+			Namespace: m.Namespace,
+			Name:      m.Name,
+			Help:      m.Help,
+			LabelInfo: labelsVals,
+		})
+	}
+	return true, nil
+}
+
+// NewMetricVecWithlabels - sets the value of gauge to the one provided
+func NewCounterVecMultiLabels(namespace, id, help string, labelsVals []Labels) *MetricMetadata {
+	metric := MetricMetadata{
+		Namespace: namespace,
+		Name:      id,
+		Help:      help,
+		LabelInfo: labelsVals,
+	}
+	_, ok := CountersVecs[id]
+	if !ok {
+		CreateCounterVecWithMultiLabels(id, metric)
+	}
+	return &metric
+}
+
+// SetupGaugeVec - sets the value of gauge to the one provided
+func SetupCounterVecMultiLabels(namespace, id, help string, labelsVals []Labels) (*MetricMetadata, error) {
+	metric := MetricMetadata{
+		Namespace: namespace,
+		Name:      id,
+		Help:      help,
+		LabelInfo: labelsVals,
+	}
+	counter, ok := CountersVecs[id]
+	if ok {
+		counter.ValChannel <- CounterVecMetric{MetricName: id, LabelInfo: labelsVals}
+		return &metric, nil
+	} else {
+		CreateCounterVecWithMultiLabels(id, metric)
+	}
+	return &metric, nil
+}
+
+// SetupGaugeVec - sets the value of gauge to the one provided
+func SetupCounterVec(namespace, id, help, labelTitle, labelVal, val string) (bool, error) {
+
+	counter, ok := CountersVecs[id]
+	if ok {
+		var tmp []Labels
+		tmp = append(tmp, Labels{Name: labelTitle, Value: labelVal})
+		counter.ValChannel <- CounterVecMetric{MetricName: labelVal, LabelInfo: tmp}
+		return true, nil
+	} else {
+		CreateCounterVecWithMultiLabels(id, MetricMetadata{
+			Namespace:  namespace,
+			Name:       id,
+			Help:       help,
+			LabelTitle: labelTitle,
+			LabelVal:   labelVal,
+		})
+	}
+	return true, nil
+}
+
+// CreateGaugeVecWithMultiLabels - Creates Gaguge based on the supplied metrics metadata
+func CreateCounterVecWithMultiLabels(id string, data MetricMetadata) {
+	var definedLabels []string
+	for _, labels := range data.LabelInfo {
+		definedLabels = append(definedLabels, labels.Name)
+	}
+	CountersVecs[id] = countervecData{
+		Countervec: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name:      id,
+				Namespace: data.Namespace,
+				Help:      data.Help,
+			},
+			definedLabels),
+		ValChannel: make(chan CounterVecMetric),
+	}
+
+	prometheus.MustRegister(CountersVecs[id].Countervec)
+
+	go func(cd countervecData) {
+		for {
+			val := <-cd.ValChannel
+			var allLabelsVals = make(prometheus.Labels)
+			for _, x := range val.LabelInfo {
+				allLabelsVals[x.Name] = x.Value
+			}
+			cd.Countervec.With(allLabelsVals).Inc()
+		}
+	}(CountersVecs[id])
 }
 
 // SetupGaugeVec - sets the value of gauge to the one provided
@@ -116,16 +251,19 @@ func SetupGauge(namespace, id, help string, val float64) (bool, error) {
 }
 
 // Increments Value of Counter by 1 on given counter id
-func IncrementCounter(namespace, id, help string) (bool, error) {
+func IncrementCounter(namespace, labelTitle, labelVal, labelInfo, id, help string) (bool, error) {
 	counter, ok := Counters[id]
 	if ok {
 		counter.IncChannel <- 1
 		return true, nil
 	} else {
 		CreateCounter(id, MetricMetadata{
-			Name:      id,
-			Namespace: namespace,
-			Help:      help,
+			Name:       id,
+			Namespace:  namespace,
+			LabelTitle: labelTitle,
+			LabelVal:   labelVal,
+			//	LabelInfo:  labelInfo,
+			Help: help,
 		})
 	}
 	counter, ok = Counters[id]
